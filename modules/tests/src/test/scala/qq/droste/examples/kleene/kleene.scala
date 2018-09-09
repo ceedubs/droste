@@ -27,8 +27,8 @@ object Match {
 
   /** An inclusive range */
   final case class Range[+A](lower: A, upper: A) extends Match[A]
+
   case object Wildcard extends Match[Nothing]
-  case object EOF extends Match[Nothing]
 }
 
 object regex {
@@ -46,7 +46,6 @@ object regex {
     case Match.Literal(expected) => checkHead(_ === expected)
     case Match.Wildcard => checkHead(_ => true)
     case Match.Range(l, r) => checkHead(a => a >= l && a <= r)
-    case Match.EOF => sa => if (sa.isEmpty) Stream(sa) else Stream.empty
   }
 
   private def repeatApply[A](f: Stream[A] => Stream[Stream[A]]): Stream[A] => Stream[Stream[A]] =
@@ -77,8 +76,6 @@ object regex {
 
   def wildcard[A]: Regex[A] = toMu(Fix(CoattrF.pure(Match.Wildcard)))
 
-  def eof[A]: Regex[A] = toMu(Fix(CoattrF.pure(Match.EOF)))
-
   def consume[A:Order]: Algebra[CoattrF[KleeneF, Match[A], ?], Consume[A]] =
     Algebra[CoattrF[KleeneF, Match[A], ?], Consume[A]]{
       CoattrF.un(_) match {
@@ -94,6 +91,41 @@ object regex {
 }
 
 import org.scalacheck.Properties
+
+object ScalacheckRegex {
+  import org.scalacheck.{Arbitrary, Gen}, Gen.Choose
+  import regex._
+
+  def matchGen[A](m: Match[A])(implicit arbA: Arbitrary[A], chooseA: Choose[A]): Gen[A] = m match {
+    case Match.Literal(expected) => Gen.const(expected)
+    case Match.Wildcard => arbA.arbitrary
+    case Match.Range(l, r) => chooseA.choose(l, r)
+  }
+
+  def kleeneFStreamAlgebra[A]: Algebra[KleeneF, Gen[Stream[A]]] = Algebra{
+    case KleeneF.Plus(l, r) => Gen.oneOf(l, r)
+    case KleeneF.Times(l, r) => l.flatMap(ls => r.map(rs => ls ++ rs))
+    // TODO ceedubs probably need to do something fancier so we don't get large nested structures
+    case KleeneF.Star(g) => Gen.sized(maxSize =>
+      for {
+        size <- Gen.chooseNum(0, maxSize)
+        sa <- g
+      } yield Stream.fill(size)(sa).flatten
+    )
+    case KleeneF.Zero => Gen.fail
+    case KleeneF.One => Gen.const(Stream.empty)
+  }
+
+  def regexGen[A:Arbitrary:Choose]: Algebra[CoattrF[KleeneF, Match[A], ?], Gen[Stream[A]]] =
+    Algebra[CoattrF[KleeneF, Match[A], ?], Gen[Stream[A]]]{
+      CoattrF.un(_) match {
+        case Left(ma) => matchGen(ma).map(Stream(_))
+        case Right(kf) => kleeneFStreamAlgebra(kf)
+      }
+    }
+
+  def regexStringGen(r: Regex[Char]): Gen[String] = r(regexGen[Char]).map(_.mkString)
+}
 
 final class RegexTests extends Properties("Regex"){
   import regex._
@@ -140,12 +172,6 @@ final class RegexTests extends Properties("Regex"){
 
   property("wildcard empty") = !stringMatcher(wildcard[Char])("")
 
-  property("eof empty") = stringMatcher(eof[Char])("")
-
-  property("eof one") = !stringMatcher(eof[Char])("a")
-
-  property("eof two") = !stringMatcher(eof[Char])("ab")
-
   property("inside range") = stringMatcher(range('a', 'c'))("b")
 
   property("left range") = stringMatcher(range('a', 'c'))("a")
@@ -153,4 +179,16 @@ final class RegexTests extends Properties("Regex"){
   property("right range") = stringMatcher(range('a', 'c'))("c")
 
   property("outside range") = !stringMatcher(range('a', 'c'))("d")
+}
+
+final class ScalacheckRegexTests extends Properties("Regex"){
+  import regex._
+  import ScalacheckRegex._
+  import org.scalacheck.Prop
+
+  property("testing") = {
+    val r = andThen(or(literal('a'), star(literal('b'))), literal('c'))
+    val matcher = stringMatcher(r)
+    Prop.forAll(regexStringGen(r)){ matcher(_) }
+  }
 }
