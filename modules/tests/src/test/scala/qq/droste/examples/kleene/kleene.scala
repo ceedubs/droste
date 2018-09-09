@@ -72,6 +72,11 @@ object regex {
 
   def andThen[A](l: Regex[A], r: Regex[A]): Regex[A] = Mu(CoattrF.roll(KleeneF.Times(l, r)))
 
+  /**
+   * AKA `+` in regular expressions, but I avoided confusion with `Plus` corresponding to "or".
+   */
+  def oneOrMore[A](value: Regex[A]): Regex[A] = andThen(value, star(value))
+
   def star[A](value: Regex[A]): Regex[A] = Mu(CoattrF.roll(KleeneF.Star(value)))
 
   def wildcard[A]: Regex[A] = toMu(Fix(CoattrF.pure(Match.Wildcard)))
@@ -179,6 +184,14 @@ final class RegexTests extends Properties("Regex"){
   property("right range") = stringMatcher(range('a', 'c'))("c")
 
   property("outside range") = !stringMatcher(range('a', 'c'))("d")
+
+  property("oneOrMore zero") = !stringMatcher(oneOrMore(literal('b')))("")
+
+  property("oneOrMore one") = stringMatcher(oneOrMore(literal('b')))("b")
+
+  property("oneOrMore two") = stringMatcher(oneOrMore(literal('b')))("bb")
+
+  property("oneOrMore three") = stringMatcher(oneOrMore(literal('b')))("bbb")
 }
 
 final class ScalacheckRegexTests extends Properties("Regex"){
