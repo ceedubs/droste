@@ -3,13 +3,11 @@ package examples
 
 import qq.droste.data._
 import qq.droste.data.prelude._
-import qq.droste.macros.deriveTraverse
 import cats.implicits._
 
-import cats.Order
+import cats.{Applicative, Eval, Order, Traverse}
 import cats.implicits._
 
-@deriveTraverse
 sealed abstract class KleeneF[+A] extends Product with Serializable
 
 object KleeneF {
@@ -18,6 +16,33 @@ object KleeneF {
   final case class Star[+A](value: A) extends KleeneF[A]
   case object Zero extends KleeneF[Nothing]
   case object One extends KleeneF[Nothing]
+
+  implicit val traverseKleeneF: Traverse[KleeneF] = new Traverse[KleeneF] {
+    def traverse[G[_], A, B](fa: KleeneF[A])(f: A => G[B])(implicit G: Applicative[G]): G[KleeneF[B]] =
+      fa match {
+        case Plus(l, r) => G.map2(f(l), f(r))((lb, rb) => Plus(lb, rb))
+        case Times(l, r) => G.map2(f(l), f(r))((lb, rb) => Times(lb, rb))
+        case Star(x) => G.map(f(x))(Star(_))
+        case Zero => G.pure(Zero)
+        case One => G.pure(One)
+      }
+
+    def foldLeft[A, B](fa: KleeneF[A], b: B)(f: (B, A) => B): B = fa match {
+        case Plus(l, r) => f(f(b, l), r)
+        case Times(l, r) => f(f(b, l), r)
+        case Star(x) => f(b, x)
+        case Zero => b
+        case One => b
+    }
+
+    def foldRight[A, B](fa: KleeneF[A], lb: Eval[B])(f: (A, Eval[B]) => Eval[B]): Eval[B] = fa match {
+        case Plus(l, r) => f(l, f(r, lb))
+        case Times(l, r) => f(l, f(r, lb))
+        case Star(x) => f(x, lb)
+        case Zero => lb
+        case One => lb
+    }
+  }
 }
 
 sealed abstract class Match[+A] extends Product with Serializable
@@ -80,6 +105,13 @@ object regex {
   def star[A](value: Regex[A]): Regex[A] = Mu(CoattrF.roll(KleeneF.Star(value)))
 
   def wildcard[A]: Regex[A] = toMu(Fix(CoattrF.pure(Match.Wildcard)))
+
+  /**
+   * A match on the empty string (this should always succeed and consume no input).
+   */
+  def empty[A]: Regex[A] = Mu(CoattrF.roll(KleeneF.One))
+
+  def count[A](n: Int, r: Regex[A]): Regex[A] = (1 to n).foldLeft(empty[A])((acc, _) => andThen(acc, r)) 
 
   def consume[A:Order]: Algebra[CoattrF[KleeneF, Match[A], ?], Consume[A]] =
     Algebra[CoattrF[KleeneF, Match[A], ?], Consume[A]]{
@@ -192,6 +224,20 @@ final class RegexTests extends Properties("Regex"){
   property("oneOrMore two") = stringMatcher(oneOrMore(literal('b')))("bb")
 
   property("oneOrMore three") = stringMatcher(oneOrMore(literal('b')))("bbb")
+
+  property("count zero empty") = stringMatcher(count(0, literal('b')))("")
+
+  property("count zero non-empty") = !stringMatcher(count(0, literal('b')))("b")
+
+  property("count 1 empty") = !stringMatcher(count(1, literal('b')))("")
+
+  property("count 1 match") = stringMatcher(count(1, literal('b')))("b")
+
+  property("count 1 non-match") = !stringMatcher(count(1, literal('b')))("c")
+
+  property("count 2 match") = stringMatcher(count(2, literal('b')))("bb")
+
+  property("count 2 non-match") = !stringMatcher(count(2, literal('b')))("bc")
 }
 
 final class ScalacheckRegexTests extends Properties("Regex"){
